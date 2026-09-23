@@ -1,0 +1,289 @@
+{
+  "verification": {
+    "subject": "Vérifiez votre email KAMBRIQ",
+    "heading": "Bienvenue, {firstName} !",
+    "body": "Merci de rejoindre KAMBRIQ. Veuillez vérifier votre adresse email pour commencer.",
+    "button": "Vérifier l'email",
+    "expiry": "Ce lien expire dans 24 heures. Si le bouton ne fonctionne pas, copiez cette URL dans votre navigateur :"
+  },
+  "passwordReset": {
+    "subject": "Réinitialisez votre mot de passe KAMBRIQ",
+    "heading": "Réinitialisation du mot de passe",
+    "body": "Bonjour {firstName}, nous avons reçu une demande de réinitialisation de votre mot de passe.",
+    "button": "Réinitialiser le mot de passe",
+    "expiry": "Ce lien expire dans 1 heure. Si vous n'avez pas fait cette demande, vous pouvez ignorer cet email - votre mot de passe ne sera pas modifié."
+  },
+  "passwordResetConfirmation": {
+    "subject": "Votre mot de passe KAMBRIQ a été réinitialisé",
+    "heading": "Mot de passe modifié",
+    "body": "Bonjour {firstName}, votre mot de passe a été réinitialisé avec succès.",
+    "warning": "Si vous n'avez pas effectué cette modification, veuillez contacter notre équipe de support immédiatement."
+  },
+  "accountReactivated": {
+    "subject": "Bon retour sur KAMBRIQ !",
+    "heading": "Compte réactivé",
+    "body": "Bonjour {firstName}, content de vous revoir ! Votre compte KAMBRIQ a été réactivé avec succès.",
+    "note": "Toutes vos données sont intactes et prêtes pour vous."
+  },
+  "accountBlocked": {
+    "subject": "Votre compte KAMBRIQ a été suspendu",
+    "heading": "Compte suspendu",
+    "body": "Bonjour {firstName}, votre compte KAMBRIQ a été suspendu par un administrateur.",
+    "note": "Si vous pensez qu'il s'agit d'une erreur, veuillez contacter notre équipe de support."
+  },
+  "accountUnblocked": {
+    "subject": "Votre compte KAMBRIQ a été réactivé",
+    "heading": "Compte réactivé",
+    "body": "Bonjour {firstName}, votre compte KAMBRIQ a été réactivé par un administrateur. Vous pouvez à nouveau vous connecter."
+  },
+  "accountDeletion": {
+    "subject": "Votre compte KAMBRIQ est programmé pour suppression",
+    "heading": "Suppression du compte programmée",
+    "body": "Bonjour {firstName}, comme demandé, votre compte KAMBRIQ a été désactivé.",
+    "grace": "Vous avez <strong>{days} jours</strong> pour changer d'avis. Connectez-vous simplement pour réactiver votre compte.",
+    "warning": "Après le délai de grâce, votre compte et vos données seront définitivement supprimés."
+  },
+  "examPassed": {
+    "subject": "🎉 Félicitations ! Vous avez réussi l'examen KBS",
+    "heading": "Examen réussi !",
+    "body": "Bonjour {firstName}, félicitations ! Vous avez obtenu <strong>{score}%</strong> à l'examen de certification KBS (score requis : {passingScore}%).",
+    "note": "Vous êtes désormais éligible à la certification KCA. Un administrateur examinera et émettra votre certificat sous peu."
+  },
+  "examFailed": {
+    "subject": "Résultats de l'examen KBS",
+    "heading": "Résultats de l'examen",
+    "body": "Bonjour {firstName}, malheureusement vous avez obtenu <strong>{score}%</strong> à l'examen KBS (score requis : {passingScore}%).",
+    "retake": "Il vous reste <strong>{attemptsRemaining}</strong> tentative(s). Vous pourrez repasser l'examen après le <strong>{retakeDate}</strong>.",
+    "encouragement": "Nous vous recommandons de revoir les supports de cours avant votre prochaine tentative. Vous allez y arriver !"
+  },
+  "certificateIssued": {
+    "subject": "🏆 Votre certificat KCA est prêt !",
+    "heading": "Certificat KCA émis",
+    "body": "Bonjour {firstName}, votre certificat d'Agent Certifié KAMBRIQ a été émis !",
+    "numberLabel": "Numéro de certificat :",
+    "validLabel": "Valide jusqu'au : <strong>{validUntil}</strong>",
+    "note": "Vous pouvez maintenant postuler pour rejoindre KAMNET et commencer votre parcours d'agent KAMBRIQ."
+  },
+  "applicationSubmitted": {
+    "subject": "Demande KAMNET reçue",
+    "heading": "Demande soumise",
+    "body": "Bonjour {firstName}, nous avons reçu votre demande d'adhésion au réseau d'agents KAMNET.",
+    "note": "Notre équipe examinera votre demande sous peu. Vous recevrez un email dès qu'une décision sera prise."
+  },
+  "applicationApproved": {
+    "subject": "🎉 Bienvenue dans KAMNET !",
+    "heading": "Demande approuvée",
+    "body": "Bonjour {firstName}, bonne nouvelle ! Votre demande d'adhésion KAMNET a été approuvée.",
+    "agentCode": "Votre code agent :",
+    "note": "Vous pouvez maintenant accéder au tableau de bord agent, parcourir les terrains et commencer votre parcours KAMBRIQ."
+  },
+  "applicationRejected": {
+    "subject": "Mise à jour de votre demande KAMNET",
+    "heading": "Mise à jour de la demande",
+    "body": "Bonjour {firstName}, après examen, votre demande KAMNET n'a pas pu être approuvée pour le moment.",
+    "reason": "Note du réviseur : <em>{reason}</em>",
+    "note": "Si vous pensez qu'il s'agit d'une erreur, veuillez contacter notre équipe de support."
+  },
+  "agentSuspended": {
+    "subject": "Votre compte agent KAMNET a été suspendu",
+    "heading": "Compte suspendu",
+    "body": "Bonjour {firstName}, votre compte agent KAMNET a été suspendu.",
+    "note": "Veuillez contacter l'administration KAMNET pour plus d'informations."
+  },
+  "agentReactivated": {
+    "subject": "Votre compte agent KAMNET a été réactivé",
+    "heading": "Compte agent réactivé",
+    "body": "Bonjour {firstName}, votre compte agent KAMNET a été réactivé. Vous pouvez à nouveau accéder à toutes les fonctionnalités."
+  },
+  "agentPromotion": {
+    "subject": "🎉 Vous avez été promu sur KAMNET !",
+    "heading": "Félicitations, {firstName} !",
+    "body": "Votre travail porte ses fruits - vous venez de gagner une promotion sur le réseau KAMNET.",
+    "tierLabel": "Votre nouveau rang :",
+    "note": "Continuez à développer votre réseau et à conclure des ventes. Le prochain niveau est à portée de main."
+  },
+  "emailChangeRequest": {
+    "subject": "Confirmez votre nouvelle adresse email KAMBRIQ",
+    "heading": "Changement d'adresse email",
+    "body": "Bonjour {firstName}, vous avez demandé à changer votre adresse email vers <strong>{newEmail}</strong>. Cliquez ci-dessous pour confirmer.",
+    "button": "Confirmer le changement",
+    "expiry": "Ce lien expire dans 24 heures. Si vous n'avez pas fait cette demande, ignorez cet email - votre adresse actuelle reste inchangée."
+  },
+  "emailChangeConfirm": {
+    "subject": "Votre adresse email KAMBRIQ a été modifiée",
+    "heading": "Adresse email mise à jour",
+    "body": "Bonjour {firstName}, votre adresse email KAMBRIQ a été changée vers <strong>{newEmail}</strong>.",
+    "warning": "Si vous n'avez pas effectué cette modification, contactez notre support immédiatement."
+  },
+  "idVerified": {
+    "subject": "Votre identité a été vérifiée",
+    "heading": "Identité vérifiée ✓",
+    "body": "Bonjour {firstName}, votre document d'identité a été examiné et approuvé.",
+    "note": "Votre compte est maintenant vérifié."
+  },
+  "idRejected": {
+    "subject": "Vérification d'identité - action requise",
+    "heading": "Document non accepté",
+    "body": "Bonjour {firstName}, votre document d'identité n'a pas pu être validé.",
+    "reason": "Motif : <strong>{reason}</strong>",
+    "retry": "Veuillez soumettre un nouveau document valide depuis votre espace personnel."
+  },
+  "inviteUser": {
+    "subject": "Bienvenue sur KAMBRIQ - Définissez votre mot de passe",
+    "heading": "Bienvenue, {firstName} !",
+    "body": "Un compte KAMBRIQ a été créé pour vous. Définissez votre mot de passe pour commencer.",
+    "button": "Définir mon mot de passe",
+    "expiry": "Ce lien expire dans 24 heures. Si vous n'avez pas demandé ce compte, vous pouvez ignorer cet email."
+  },
+  "kbsEnrollmentReceived": {
+    "subject": "Votre candidature KBS a bien été reçue",
+    "heading": "Candidature reçue",
+    "body": "Bonjour {firstName}, nous avons bien reçu votre candidature à la formation KBS (Kambriq Business School).",
+    "paymentIntro": "Pour finaliser votre inscription, merci de procéder au paiement des frais de formation :",
+    "amount": "Montant : 249 €",
+    "instructions": "Les instructions de paiement vous seront transmises par notre équipe. Veuillez nous contacter à contact@kambriq.com pour recevoir les détails.",
+    "note": "Une fois le paiement reçu, votre candidature sera validée sous 48h ouvrées et vous pourrez accéder à votre parcours de formation."
+  },
+  "reservationCreated": {
+    "subject": "Nouvelle réservation créée",
+    "heading": "Réservation confirmée de votre côté",
+    "body": "Bonjour {firstName}, vous venez de réserver un terrain pour {clientName}.",
+    "landInfo": "Terrain : <strong>{landTitle}</strong> — {price} XAF",
+    "note": "Le client a été notifié et recevra son accès au portail sous peu."
+  },
+  "clientPortalAccess": {
+    "subject": "Bienvenue sur votre portail client KAMBRIQ",
+    "heading": "Bienvenue chez KAMBRIQ",
+    "body": "Bonjour {clientName}, votre réservation a été ouverte et un portail client a été créé pour vous.",
+    "landInfo": "Terrain : <strong>{landTitle}</strong> — {price} XAF",
+    "agent": "Votre agent KAMNET : {agentName}",
+    "note": "Vous pouvez suivre chaque étape de votre acquisition depuis votre portail."
+  },
+  "reservationConfirmed": {
+    "subject": "Votre acompte a été reçu",
+    "heading": "Acompte confirmé",
+    "body": "Bonjour {firstName}, l'acompte pour votre réservation {reservationId} a été reçu et validé.",
+    "note": "Nous vous tiendrons informé(e) de l'avancement de votre dossier."
+  },
+  "reservationCancelled": {
+    "subject": "Votre réservation a été annulée",
+    "heading": "Réservation annulée",
+    "body": "Bonjour {firstName}, votre réservation sur {landTitle} a été annulée.",
+    "reason": "Raison : <strong>{reason}</strong>",
+    "note": "Pour toute question, veuillez contacter votre agent KAMNET."
+  },
+  "clientDocumentUploaded": {
+    "subject": "Nouveau document client envoyé",
+    "heading": "Un document client a été envoyé",
+    "body": "Bonjour {firstName}, votre client {clientName} vient d'envoyer un document {docType} pour la réservation sur {landTitle}.",
+    "note": "Veuillez vérifier et valider les documents depuis le tableau de bord admin une fois le dossier complet."
+  },
+  "clientDocumentRejected": {
+    "subject": "Votre document n'a pas été accepté",
+    "heading": "Document rejeté",
+    "body": "Bonjour {clientName}, nous n'avons pas pu valider votre document {docType} pour la réservation sur {landTitle}.",
+    "reason": "Raison : <strong>{reason}</strong>",
+    "retry": "Veuillez vous connecter à votre portail et envoyer un nouveau document."
+  },
+  "clientDocumentsValidated": {
+    "subject": "Vos documents ont été validés",
+    "heading": "Documents validés",
+    "body": "Bonjour {clientName}, vos documents pour la réservation sur {landTitle} ont été vérifiés et validés par KAMBRIQ.",
+    "note": "Nous attendons maintenant le paiement final pour passer à l'étape suivante."
+  },
+  "paymentConfirmed": {
+    "subject": "Paiement reçu",
+    "heading": "Paiement final confirmé",
+    "body": "Bonjour {clientName}, votre paiement restant pour la réservation sur {landTitle} a bien été reçu.",
+    "note": "Votre dossier passe maintenant au transfert de titre foncier."
+  },
+  "dossierStarted": {
+    "subject": "Votre transfert de titre a commencé",
+    "heading": "Transfert de titre en cours",
+    "body": "Bonjour {clientName}, le transfert de titre pour votre terrain {landTitle} a officiellement démarré.",
+    "note": "Les documents finaux vous seront remis une fois le transfert terminé."
+  },
+  "footer": {
+    "copyright": "© {year} KAMBRIQ. Tous droits réservés.",
+    "ignore": "Si vous n'avez pas demandé cet email, vous pouvez l'ignorer en toute sécurité."
+  },
+  "paymentInstructions": {
+    "subject": "Votre référence de paiement KAMBRIQ : {reference}",
+    "heading": "Instructions de paiement",
+    "intro": "Bonjour {clientName}, voici tout ce qu'il faut pour régler {subject}.",
+    "referenceLabel": "Référence de paiement",
+    "referenceRule": "Cette référence doit figurer en motif du virement, du transfert mobile money ou du reçu chez le notaire. Un paiement sans cette référence ne peut pas être rattaché à votre dossier.",
+    "amountLabel": "Montant à régler",
+    "deadlineLabel": "À régler avant le",
+    "channelsHeading": "Trois façons de payer",
+    "bankHeading": "1. Virement bancaire",
+    "bankNameLabel": "Banque",
+    "bankAccountNameLabel": "Titulaire du compte",
+    "bankIbanLabel": "IBAN",
+    "bankSwiftLabel": "Code SWIFT / BIC",
+    "mobileHeading": "2. Mobile money",
+    "mobileOperatorLabel": "Opérateur",
+    "mobileNumberLabel": "Numéro",
+    "mobileNameLabel": "Nom du compte",
+    "notaryHeading": "3. Espèces ou acte chez le notaire",
+    "notaryNameLabel": "Notaire",
+    "notaryPhoneLabel": "Téléphone",
+    "notaryAddressLabel": "Adresse",
+    "forwarding": "Vous pouvez transmettre ce message tel quel à la personne qui effectuera le paiement pour vous. Tout ce dont elle a besoin s'y trouve.",
+    "afterPaying": "Une fois le paiement effectué, conservez le reçu : il vous sera demandé. KAMBRIQ vérifie chaque encaissement avant de le valider, ce qui peut prendre quelques jours ouvrés.",
+    "supportLabel": "Une question",
+    "supportBody": "Écrivez à {supportEmail} ou appelez le {supportPhone}, en indiquant la référence ci-dessus."
+  },
+  "paymentReminder": {
+    "subject": "Rappel : paiement {reference} à régler avant le {deadline}",
+    "subjectOverdue": "Rappel : paiement {reference} — échéance dépassée",
+    "heading": "Rappel de paiement",
+    "introUpcoming": "Bonjour {clientName}, la date limite pour le règlement de {subject} approche : c'est le {deadline}.",
+    "introOverdue": "Bonjour {clientName}, la date limite du {deadline} pour le règlement de {subject} est passée et nous n'avons pas encore enregistré votre paiement.",
+    "crossed": "Si vous avez déjà payé, ce message a simplement croisé votre virement — il n'y a rien à faire, l'encaissement sera rattaché à votre dossier dès qu'il nous parviendra.",
+    "instructionsAgain": "Vos coordonnées de paiement restent disponibles sur votre espace, derrière votre connexion."
+  },
+  "paymentInstructionsAvailable": {
+    "subject": "Vos coordonnées de paiement sont disponibles : {reference}",
+    "heading": "Vos coordonnées de paiement sont prêtes",
+    "intro": "Bonjour {clientName}, nous avons préparé les coordonnées pour le règlement de {subject}. Elles vous attendent sur votre espace, après connexion.",
+    "channelLabel": "Moyen de paiement retenu",
+    "button": "Voir mes coordonnées de paiement",
+    "why": "Elles ne figurent pas dans cet email : des coordonnées bancaires ne doivent pas circuler dans une boîte mail que l'on peut transférer. Sur votre espace, elles sont au même endroit que votre paiement et vous pouvez y revenir à tout moment."
+  },
+  "contactRequestReceived": {
+    "subject": "Nous avons bien recu votre message - KAMBRIQ",
+    "heading": "Votre message est arrive",
+    "intro": "Bonjour {name}, nous avons bien recu votre demande et une personne de l'equipe vous repondra sous 24 heures ouvrees.",
+    "recapLabel": "Ce que vous nous avez ecrit",
+    "subjectLabel": "Sujet",
+    "referenceLabel": "Reference de votre demande",
+    "referenceRule": "Conservez-la : elle nous permet de retrouver votre message si vous nous rappelez.",
+    "closing": "Si votre demande est urgente, vous pouvez repondre directement a cet email."
+  },
+  "contactRequestNotification": {
+    "subject": "Nouvelle demande de contact - {subject}",
+    "heading": "Une nouvelle demande de contact est arrivee",
+    "intro": "Recue le {receivedAt}. Repondez a {email}.",
+    "nameLabel": "Nom",
+    "emailLabel": "Email",
+    "phoneLabel": "Telephone",
+    "subjectLabel": "Sujet",
+    "localeLabel": "Langue de la page",
+    "messageLabel": "Message",
+    "consentLabel": "Consentement donne le",
+    "referenceLabel": "Reference",
+    "none": "Non renseigne"
+  },
+  "contactDigest": {
+    "subject": "Demandes de contact : {count} sur 48 h",
+    "heading": "Releve quotidien des demandes de contact",
+    "intro": "Sur les 48 dernieres heures ({since} - {until}), {count} demande(s) de contact ont ete recues.",
+    "zeroNote": "Aucune demande sur la periode. Ce releve part tous les jours, y compris a zero : s'il cesse d'arriver, c'est le signal.",
+    "pendingLabel": "En attente de reponse (tous ages confondus)",
+    "oldestLabel": "La plus ancienne en attente",
+    "days": "{days} jour(s)",
+    "none": "Aucune",
+    "breakdownLabel": "Par sujet, sur la periode"
+  }
+}

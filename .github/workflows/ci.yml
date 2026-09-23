@@ -1,0 +1,733 @@
+name: CI
+
+# ------------------------------------------------------------------------------
+# Responsibilities:
+#   1. Run quality checks (lint / typecheck / test) in parallel on every pull
+#      request, whatever its base branch, and on pushes to develop or main.
+#   2. Build and push API + Web Docker images to ECR on develop pushes only
+#      (after all quality checks pass).
+#   3. Trigger the deploy-dev workflow automatically once both images are ready.
+#
+# Production deploys workflow has been removed. Will be reintroduced for go-live.
+# ------------------------------------------------------------------------------
+
+on:
+  push:
+    branches: [main, develop]
+  # A38: no `branches` here, deliberately. This filters on the BASE branch, and
+  # with [main, develop] a pull request stacked on a feature branch matched no
+  # trigger at all - no checks ran and GitHub called it mergeable, because
+  # nothing was missing. Four PRs merged that way on 20 September. Every
+  # expensive job below is gated on push-to-develop, not on this filter, so
+  # widening it cannot build, push, deploy or run a journey.
+  pull_request:
+
+# ------------------------------------------------------------------------------
+# CONCURRENCY - and the one job that must never be cancelled
+#
+# Three pushes to a PR used to run three full pipelines to completion and bill
+# all three. Superseded PR runs are now cancelled.
+#
+# `cancel-in-progress` is an EXPRESSION, not `true`. On `push` to develop it
+# evaluates false, so a develop run is never cancelled - that is the run which
+# migrates the database, updates two ECS services and bootstraps the admins, and
+# killing it between the migration and the service update leaves dev in a state
+# no log explains. A PR run deploys nothing, so cancelling one costs only time.
+#
+# deploy-dev.yml carries its own `concurrency: deploy-dev, cancel-in-progress:
+# false` as a second barrier, so two deploys cannot overlap even across runs.
+# ------------------------------------------------------------------------------
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# ------------------------------------------------------------------------------
+# WHERE THIS RUNS
+#
+# `runs-on` reads ONE repository variable, `CI_RUNNER_LABELS`, holding a JSON
+# array of runner labels. Every job in every workflow uses the same expression,
+# so the target lives in a single place outside the code.
+#
+#   set    ["self-hosted","macOS","ARM64","kambriq-ci"]   -> Visquis's Mac
+#   unset  (or delete the variable)                       -> ubuntu-latest
+#
+# The `|| '["ubuntu-latest"]'` fallback is the point: an unset variable returns
+# to GitHub-hosted runners rather than producing an empty `runs-on`, which is a
+# job that fails for a reason nobody can read. October's reversal is deleting
+# one variable in the repository settings - no PR, no code change, no rebuild.
+# ------------------------------------------------------------------------------
+jobs:
+  # -- What changed, computed once ----------------------------------------------
+  #
+  # A documentation-only PR should not build an image or drive a browser.
+  #
+  # This gates PULL REQUESTS ONLY. On a push to develop it always reports
+  # `code=true`, and that is deliberate: this project checks that the sha served
+  # by dev equals develop's head, and a docs-only merge that skipped the deploy
+  # would break that invariant for a reason nobody would remember a week later.
+  # Docs are cheap to deploy; a broken invariant is not.
+  #
+  # Safe to skip jobs here because this repository has NO required status checks
+  # - branch protection is not available on its plan, confirmed against the API
+  # (`/branches/develop/protection` -> 403 "Upgrade to GitHub Pro"). If the plan
+  # changes, a skipped job becomes a merge blocker and these gates must be
+  # rewritten as jobs that always run and exit 0 when there is nothing to do.
+  changes:
+    name: What changed
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 5
+    outputs:
+      code: ${{ steps.filter.outputs.code }}
+      db: ${{ steps.filter.outputs.db }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - id: filter
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" != "pull_request" ]; then
+            echo "push to ${{ github.ref_name }} - everything runs, so the deployed sha keeps matching develop"
+            echo "code=true" >> "$GITHUB_OUTPUT"
+            echo "db=true" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+          FILES="$(git diff --name-only "origin/${{ github.base_ref }}...HEAD")"
+          echo "changed files:"; echo "${FILES}" | sed 's/^/  /'
+          # Anything that is not documentation counts as code. Listed as an
+          # exclusion rather than an inclusion: a new top-level directory is
+          # then treated as code by default, which is the safe way to be wrong.
+          if echo "${FILES}" | grep -qvE '^(docs/|CLAUDE\.md|README\.md|.*\.md$)'; then
+            echo "code=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "documentation only - skipping quality, build, deploy and e2e"
+            echo "code=false" >> "$GITHUB_OUTPUT"
+          fi
+
+          # A17. The database-backed suite (pnpm test:db) needs a Postgres service,
+          # so it runs only where it can fail: a change to a prisma schema or
+          # migration, or to the database test directory itself. Filtering it here
+          # keeps the service container off every unrelated push.
+          if echo "${FILES}" | grep -qE '^(prisma/|apps/api/src/__test__/database/|apps/api/jest\.database\.config)'; then
+            echo "db=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "no database-relevant change - test:db skipped"
+            echo "db=false" >> "$GITHUB_OUTPUT"
+          fi
+
+  # -- Commit message validation (PR only) -------------------------------------
+  commitlint:
+    name: Commitlint
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 5
+    if: github.event_name == 'pull_request'
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+
+      - run: pnpm install --frozen-lockfile
+      - run: npx commitlint --from ${{ github.event.pull_request.base.sha }} --to ${{ github.event.pull_request.head.sha }} --verbose
+
+  # -- Quality: ONE job, not four -----------------------------------------------
+  #
+  # The matrix billed 5 minutes to do 102 seconds of work.
+  #
+  # GitHub bills each job's wall clock ROUNDED UP TO THE MINUTE, per job. The
+  # four jobs measured 47s, 58s, 58s and 118s - so 1+1+1+2 = 5 minutes billed
+  # for 4m22s of machine time, of which 102s was actual checking and 160s was
+  # four separate checkouts, four setup-nodes and four `pnpm install`s.
+  #
+  # Merged, the same work is one setup (~40s) plus 102s = ~142s, billed as 3.
+  # The trade is wall clock: 118s parallel becomes ~142s serial. Visquis waits
+  # 24 seconds longer per run and stops paying for three redundant installs.
+  #
+  # What was NOT merged: the image builds. Those stay parallel - see the note
+  # on `build-web`.
+  quality:
+    name: Quality
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true'
+    # ~142s measured; twice that, rounded. GitHub's default is 360 minutes, so
+    # one hung job would burn 18% of the monthly quota before anyone noticed.
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          # `nx affected` diffs against the base branch, which must be present.
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # The nx computation cache, keyed on the lockfile and the commit.
+      #
+      # `restore-keys` is what makes this pay: an exact miss still restores the
+      # most recent cache for the same lockfile, so a PR reuses develop's work
+      # and the develop run after the merge reuses the PR's. Without the prefix
+      # fallback every run is a cold cache and the cache is decoration.
+      - name: Cache nx computation
+        uses: actions/cache@v4
+        with:
+          path: .nx/cache
+          key: nx-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-${{ github.sha }}
+          restore-keys: |
+            nx-${{ runner.os }}-${{ hashFiles('pnpm-lock.yaml') }}-
+            nx-${{ runner.os }}-
+
+      # `nx affected` on a PR; everything on develop.
+      #
+      # On a PR the base is `origin/<base branch>` and only projects the branch
+      # actually touches are checked. On a push to develop there IS no base to
+      # compare against - the merge is already history - so develop runs the
+      # full set. That is deliberate rather than a gap: develop is the ref that
+      # gets built and deployed, and it is the last place to trust a diff.
+      # The nx cache above makes that full run mostly cache hits anyway.
+      #
+      # A19: that sentence was false for seven months. `pnpm run lint` was
+      # `nx lint api` - one project of six - so develop linted the API and
+      # nothing else, and `libs/common` carried two real errors that only a
+      # pull request touching it could ever surface. The script is now
+      # `nx run-many -t lint --all`; if it is ever narrowed again, this comment
+      # becomes a lie a second time, so narrow the comment with it.
+      - name: Lint, typecheck and test
+        env:
+          NX_SKIP_NX_CACHE: "false"
+        run: |
+          set -euo pipefail
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            BASE="origin/${{ github.base_ref }}"
+            echo "affected against ${BASE}"
+            npx nx affected -t lint --base="${BASE}"
+            npx nx affected -t test --base="${BASE}" --coverage
+          else
+            echo "push to ${{ github.ref_name }} - running the full set, no base to diff against"
+            pnpm run lint
+            pnpm run test:cov
+          fi
+          # tsc is not an nx target here; both projects typecheck in seconds.
+          pnpm run typecheck
+          pnpm run typecheck:web
+
+      - name: Upload coverage to Codecov
+        uses: codecov/codecov-action@v5
+        with:
+          token: ${{ secrets.CODECOV_TOKEN }}
+          files: coverage/apps/api/lcov.info,coverage/libs/common/lcov.info,coverage/apps/web/lcov.info
+          fail_ci_if_error: false
+
+  # -- Build and push API image (develop push only) -----------------------------
+  # -- A17: the database-backed suite, with a Postgres service ----------------
+  # Path-filtered (needs.changes.outputs.db): runs only when a prisma schema, a
+  # migration, or the database test directory changed, so the service container
+  # is not attached to every push. On push to develop everything runs.
+  test-db:
+    name: Database suite
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    needs: [changes]
+    if: needs.changes.outputs.code == 'true' && needs.changes.outputs.db == 'true'
+    timeout-minutes: 15
+    services:
+      postgres:
+        image: postgres:16-alpine
+        env:
+          POSTGRES_USER: postgres
+          POSTGRES_PASSWORD: password
+          POSTGRES_DB: postgres
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U postgres"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+
+      # postinstall generates the four prisma clients the *.dbspec.ts import.
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # global-setup.ts connects to the service, creates kambriq_core_test and
+      # kambriq_lands_test (names it refuses unless they end in _test), applies
+      # every real migration, and only then runs the suite. The default URL is
+      # postgres:password@localhost:5432, which the service maps onto the runner.
+      - name: Run the database-backed suite
+        run: npx nx run api:test-db
+
+  build-api:
+    name: Build & push API image
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    needs: [quality]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    permissions:
+      id-token: write
+      contents: read
+    environment: dev
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_REPO: ${{ vars.ECR_REPO }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image tag and build metadata
+        id: tag
+        run: |
+          IMAGE_TAG="sha-${GITHUB_SHA::7}"
+          BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          APP_VERSION="$(node -p "require('./package.json').version" 2>/dev/null || echo unknown)"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
+          echo "BUILD_TIME=${BUILD_TIME}" >> "$GITHUB_ENV"
+          echo "APP_VERSION=${APP_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          # Fargate is amd64. The runner may not be.
+          #
+          # Without this line the build inherits the RUNNER's native
+          # architecture: correct by accident on ubuntu-latest, and arm64 on
+          # the self-hosted Mac - an image ECS cannot start. The failure does
+          # not appear here; it appears minutes later as a task that stops with
+          # an exec-format error, looking like a defect in the application.
+          # Asserted against the registry in the step after this one, because
+          # the flag being present is not proof the manifest carries it.
+          platforms: linux/amd64
+          context: .
+          file: docker/Dockerfile.api
+          push: true
+          tags: |
+            ${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }}
+            ${{ env.ECR_REPO }}:dev-latest
+          build-args: |
+            GIT_SHA=${{ github.sha }}
+            GIT_REF=${{ github.ref_name }}
+            BUILD_TIME=${{ env.BUILD_TIME }}
+            IMAGE_TAG=${{ env.IMAGE_TAG }}
+            APP_VERSION=${{ env.APP_VERSION }}
+          cache-from: type=gha,scope=api
+          cache-to: type=gha,mode=max,scope=api
+
+      # -- The pushed manifest must be amd64 ----------------------------------
+      #
+      # NOT a duplicate of a check that already exists somewhere - a check that
+      # exists NOWHERE on this branch. `scripts/deploy-dev.sh` on develop is
+      # still the stale 145-line orphan; PR #93 replaces it with the pipeline
+      # that carries `assert_amd64`, and #93 is not merged.
+      #
+      # **When #93 lands this step must become a call to that function**, and
+      # #93's own anti-drift test is what will say so - it fails on any workflow
+      # step the script does not implement. Left inline here rather than left
+      # out, because an unasserted image is how Fargate gets one it cannot start.
+      #
+      # `--verbose`: a single-platform push returns a v2 image manifest with no
+      # `.manifests` array AND no top-level `.architecture` - the platform lives
+      # in the config blob. Reading `.architecture` yields null for every
+      # correctly built image, which is a gate that refuses everything.
+      - name: Assert the pushed image is linux/amd64
+        run: |
+          set -euo pipefail
+          URI="${{ env.ECR_REPO }}:${{ env.IMAGE_TAG }}"
+          ARCH="$(docker manifest inspect --verbose "${URI}" \
+            | jq -r '[ (if type == "array" then .[] else . end)
+                       | .Descriptor.platform
+                       | select(.os == "linux")
+                       | .architecture ] | unique | join(" ")')"
+          echo "${URI} -> architecture: ${ARCH:-<unreadable>}"
+          if [ "${ARCH}" != "amd64" ]; then
+            echo "::error::${URI} is ${ARCH:-unreadable}, not amd64. Fargate cannot start it." >&2
+            exit 1
+          fi
+
+  # -- Build and push Web image (develop push only) -----------------------------
+  #
+  # KEPT PARALLEL, deliberately, unlike the quality matrix.
+  #
+  # Merging the two builds would save one billed minute: 3 + 3 becomes ~5 (40s
+  # setup + 151s + 159s = 350s). But they run on develop, which is the path to
+  # a deploy, and serialising them adds ~150s to every deploy's wall clock.
+  #
+  # That is the rate Visquis is trading at: **one billed minute for two and a
+  # half minutes of waiting on every deploy**. The quality matrix went the other
+  # way - two minutes saved for 24 seconds of waiting - which is why one was
+  # merged and this was not. The numbers, not a preference for parallelism.
+
+  build-web:
+    name: Build & push Web image
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    needs: [quality]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    permissions:
+      id-token: write
+      contents: read
+    environment: dev
+    outputs:
+      image_tag: ${{ steps.tag.outputs.image_tag }}
+    env:
+      AWS_REGION: ${{ vars.AWS_REGION }}
+      ECR_WEB_REPO: ${{ vars.ECR_WEB_REPO }}
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Resolve image tag and build metadata
+        id: tag
+        run: |
+          IMAGE_TAG="sha-${GITHUB_SHA::7}"
+          BUILD_TIME="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+          APP_VERSION="$(node -p "require('./package.json').version" 2>/dev/null || echo unknown)"
+          echo "image_tag=${IMAGE_TAG}" >> "$GITHUB_OUTPUT"
+          echo "IMAGE_TAG=${IMAGE_TAG}" >> "$GITHUB_ENV"
+          echo "BUILD_TIME=${BUILD_TIME}" >> "$GITHUB_ENV"
+          echo "APP_VERSION=${APP_VERSION}" >> "$GITHUB_ENV"
+
+      - name: Configure AWS credentials
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Build and push
+        uses: docker/build-push-action@v6
+        with:
+          # Fargate is amd64. The runner may not be.
+          #
+          # Without this line the build inherits the RUNNER's native
+          # architecture: correct by accident on ubuntu-latest, and arm64 on
+          # the self-hosted Mac - an image ECS cannot start. The failure does
+          # not appear here; it appears minutes later as a task that stops with
+          # an exec-format error, looking like a defect in the application.
+          # Asserted against the registry in the step after this one, because
+          # the flag being present is not proof the manifest carries it.
+          platforms: linux/amd64
+          context: .
+          file: docker/Dockerfile.web
+          push: true
+          tags: |
+            ${{ env.ECR_WEB_REPO }}:${{ env.IMAGE_TAG }}
+            ${{ env.ECR_WEB_REPO }}:web-dev-latest
+          build-args: |
+            NEXT_PUBLIC_API_URL=${{ vars.NEXT_PUBLIC_API_URL }}
+            NEXT_PUBLIC_APP_URL=${{ vars.NEXT_PUBLIC_APP_URL }}
+            GIT_SHA=${{ github.sha }}
+            GIT_REF=${{ github.ref_name }}
+            BUILD_TIME=${{ env.BUILD_TIME }}
+            IMAGE_TAG=${{ env.IMAGE_TAG }}
+            APP_VERSION=${{ env.APP_VERSION }}
+          cache-from: type=gha,scope=web
+          cache-to: type=gha,mode=max,scope=web
+
+      # -- The pushed manifest must be amd64 ----------------------------------
+      #
+      # NOT a duplicate of a check that already exists somewhere - a check that
+      # exists NOWHERE on this branch. `scripts/deploy-dev.sh` on develop is
+      # still the stale 145-line orphan; PR #93 replaces it with the pipeline
+      # that carries `assert_amd64`, and #93 is not merged.
+      #
+      # **When #93 lands this step must become a call to that function**, and
+      # #93's own anti-drift test is what will say so - it fails on any workflow
+      # step the script does not implement. Left inline here rather than left
+      # out, because an unasserted image is how Fargate gets one it cannot start.
+      #
+      # `--verbose`: a single-platform push returns a v2 image manifest with no
+      # `.manifests` array AND no top-level `.architecture` - the platform lives
+      # in the config blob. Reading `.architecture` yields null for every
+      # correctly built image, which is a gate that refuses everything.
+      - name: Assert the pushed image is linux/amd64
+        run: |
+          set -euo pipefail
+          URI="${{ env.ECR_WEB_REPO }}:${{ env.IMAGE_TAG }}"
+          ARCH="$(docker manifest inspect --verbose "${URI}" \
+            | jq -r '[ (if type == "array" then .[] else . end)
+                       | .Descriptor.platform
+                       | select(.os == "linux")
+                       | .architecture ] | unique | join(" ")')"
+          echo "${URI} -> architecture: ${ARCH:-<unreadable>}"
+          if [ "${ARCH}" != "amd64" ]; then
+            echo "::error::${URI} is ${ARCH:-unreadable}, not amd64. Fargate cannot start it." >&2
+            exit 1
+          fi
+
+  # -- Auto-deploy to dev after successful builds -------------------------------
+  deploy-dev:
+    name: Deploy to dev
+    needs: [build-api, build-web]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    permissions:
+      id-token: write
+      contents: read
+    uses: ./.github/workflows/deploy-dev.yml
+    with:
+      api_image_tag: ${{ needs.build-api.outputs.image_tag }}
+      web_image_tag: ${{ needs.build-web.outputs.image_tag }}
+    secrets:
+      AWS_ROLE_ARN: ${{ secrets.AWS_ROLE_ARN }}
+
+  # -- The delivery journeys, against deployed dev ------------------------------
+  #
+  # These are the journeys the delivery is defined by. They ran by hand on
+  # 2026-09-04, which means once, by one person, on one build - nothing stopped
+  # them regressing the next day.
+  #
+  # EXPECTED_SHA is the gate. A live proof taken against the wrong build proves
+  # nothing about the change it was meant to certify, and that happened this week:
+  # a deploy was gated on an ECS revision counter, the counter advanced for an
+  # unrelated merge, and a fix appeared to fail against a build that did not
+  # contain it. A monotonic counter says something changed, not what is running.
+  journeys:
+    name: Delivery journeys (dev)
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 10
+    needs: [deploy-dev]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      - name: Run the delivery journeys
+        run: pnpm test:journeys
+        env:
+          KAMBRIQ_API_URL: ${{ vars.KAMBRIQ_API_URL || 'https://dev.kambriq.com/api/v1' }}
+          EXPECTED_SHA: ${{ github.sha }}
+          CI: "true"
+
+  # -- E2E tests against deployed dev (post-deploy) -----------------------------
+  e2e:
+    name: E2E Tests (dev)
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    timeout-minutes: 15
+    needs: [deploy-dev]
+    if: github.event_name == 'push' && github.ref == 'refs/heads/develop'
+    environment: dev
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: pnpm/action-setup@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: "24"
+          cache: "pnpm"
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # `--with-deps` is apt-get. It installs the shared libraries the browsers
+      # need on Debian/Ubuntu, and there is no such step on macOS - the runner
+      # image already carries what WebKit and Chromium link against. Passing it
+      # here does not degrade to a no-op; Playwright errors on an unsupported
+      # platform, so the flag is chosen by the OS rather than assumed.
+      - name: Install Playwright browsers
+        run: |
+          set -euo pipefail
+          if [ "$(uname -s)" = "Linux" ]; then
+            npx playwright install --with-deps chromium firefox webkit
+          else
+            npx playwright install chromium firefox webkit
+          fi
+
+      - name: Run E2E tests
+        run: pnpm test:e2e
+        env:
+          BASE_URL: ${{ vars.NEXT_PUBLIC_APP_URL }}
+          CI: "true"
+
+      - name: Upload Playwright report
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: playwright-report
+          # Must match `artifactRoot` in apps/web-e2e/playwright.config.ts.
+          path: dist/.playwright/apps/web-e2e/playwright-report/
+          # Fail loudly rather than uploading an empty artifact: a silently empty
+          # report is worse than none, because it looks like evidence and is not.
+          if-no-files-found: error
+          retention-days: 7
+
+  # ---------------------------------------------------------------------------
+  # The one required check, and the reason it exists rather than requiring the
+  # three jobs directly.
+  #
+  # GitHub treats a SKIPPED required check as satisfied. That is fine when a job
+  # skipped because there was genuinely nothing to do, and wrong in every other
+  # case: a job skipped because the thing before it fell over reports the same
+  # green as a job skipped because the change was documentation. One means "no
+  # work needed", the other means "nothing is known", and nothing known must
+  # never read as fine.
+  #
+  # So the gate decides for itself. A skip is acceptable only when the
+  # classifier SUCCEEDED and said documentation only. Anything else - failed,
+  # cancelled, or skipped without that specific reason - is refused.
+  #
+  # Pull requests only. Protection applies to pull requests, and running this on
+  # every push to develop would spend a billed minute proving nothing.
+  # ---------------------------------------------------------------------------
+  gate:
+    name: CI Gate
+    runs-on: ${{ fromJSON(vars.CI_RUNNER_LABELS || '["ubuntu-latest"]') }}
+    needs: [changes, commitlint, quality, test-db]
+    if: always() && github.event_name == 'pull_request'
+    timeout-minutes: 5
+    # A32 reads develop's runs and this pull request's labels through the API.
+    # Nothing here writes.
+    permissions:
+      contents: read
+      actions: read
+      pull-requests: read
+      checks: read
+    steps:
+      - name: Refuse unless every job passed, or skipped for a reason we know
+        env:
+          CHANGES_RESULT: ${{ needs.changes.result }}
+          CHANGES_CODE: ${{ needs.changes.outputs.code }}
+          CHANGES_DB: ${{ needs.changes.outputs.db }}
+          COMMITLINT_RESULT: ${{ needs.commitlint.result }}
+          QUALITY_RESULT: ${{ needs.quality.result }}
+          TESTDB_RESULT: ${{ needs.test-db.result }}
+        run: |
+          set -euo pipefail
+          failed=0
+
+          # The classifier is the thing everything else is judged against, so it
+          # has no acceptable outcome other than success. If it did not run, the
+          # reason another job skipped is unknowable.
+          if [ "$CHANGES_RESULT" = "success" ]; then
+            echo "  ok       What changed: success (code=$CHANGES_CODE)"
+          else
+            echo "  REFUSED  What changed: $CHANGES_RESULT - nothing else can be judged without it"
+            failed=1
+          fi
+
+          # A skip is legitimate here only when the classifier said so.
+          docs_only=0
+          if [ "$CHANGES_RESULT" = "success" ] && [ "$CHANGES_CODE" = "false" ]; then
+            docs_only=1
+          fi
+
+          check() {
+            name="$1"; result="$2"; may_skip="$3"
+            case "$result" in
+              success)
+                echo "  ok       $name: success" ;;
+              skipped)
+                if [ "$may_skip" = "1" ]; then
+                  echo "  ok       $name: skipped, documentation only"
+                else
+                  echo "  REFUSED  $name: skipped, and not because the change was documentation - nothing is known"
+                  failed=1
+                fi ;;
+              *)
+                echo "  REFUSED  $name: $result"
+                failed=1 ;;
+            esac
+          }
+
+          # The database suite is path-filtered: it skips legitimately when the
+          # change is documentation, or when nothing under prisma/ or the database
+          # test directory moved. Any other skip is unknown; a failure is a failure.
+          testdb_may_skip=0
+          if [ "$docs_only" = "1" ] || { [ "$CHANGES_RESULT" = "success" ] && [ "$CHANGES_DB" != "true" ]; }; then
+            testdb_may_skip=1
+          fi
+
+          # Commitlint runs on every pull request. It has no reason to skip.
+          check "Commitlint"     "$COMMITLINT_RESULT" 0
+          check "Quality"        "$QUALITY_RESULT"    "$docs_only"
+          check "Database suite" "$TESTDB_RESULT"     "$testdb_may_skip"
+
+          if [ "$failed" -ne 0 ]; then
+            echo "CI Gate refuses this pull request." >&2
+            exit 1
+          fi
+          echo "CI Gate: every job passed, or skipped for a reason we know."
+
+      # -----------------------------------------------------------------------
+      # A32 - a pull request merges only onto a develop whose HEAD was verified.
+      #
+      # On 14 September develop went red on the delivery journeys at 08:22 UTC
+      # and six pull requests merged on top of it before anybody repaired it.
+      # Their gates were green: the journeys run after deployment, on develop,
+      # and nothing a pull request runs could see them.
+      #
+      # The logic and its reasons live in scripts/ci/develop-gate.sh. It is
+      # proven by scripts/ci/develop-gate.test.sh against a stubbed API before it
+      # is trusted - here, in this job, every time. In short: read develop's head
+      # sha, then the run for THAT sha. Journeys green passes; red, never started
+      # or unknown refuses; the label `merge-on-red-develop` and a re-run release.
+      #
+      # The first version took "the newest completed develop run" from a list.
+      # On 15 September that list answered #134 with a run of the night before,
+      # six merges stale, and the gate passed. A list is what GitHub had indexed;
+      # a question by sha cannot be answered with another commit's verdict.
+      #
+      # COST: every push to develop blocks merges for the ~20 minutes its run
+      # takes to build, deploy and run the journeys. The step prints it each time.
+      # -----------------------------------------------------------------------
+      - uses: actions/checkout@v4
+        with:
+          sparse-checkout: scripts/ci
+
+      - name: Prove the develop gate's own logic (A32)
+        run: bash scripts/ci/develop-gate.test.sh
+
+      - name: Refuse unless develop's HEAD passed its delivery journeys (A32)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REPO: ${{ github.repository }}
+          PR_NUMBER: ${{ github.event.pull_request.number }}
+          OVERRIDE_LABEL: merge-on-red-develop
+          JOURNEYS_JOB: Delivery journeys (dev)
+        run: bash scripts/ci/develop-gate.sh
+

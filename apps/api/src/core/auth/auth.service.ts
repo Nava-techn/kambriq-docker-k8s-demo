@@ -1,0 +1,678 @@
+import {
+  BadRequestException,
+  Injectable,
+  Logger,
+  NotFoundException,
+  UnauthorizedException,
+} from '@nestjs/common';
+import { JwtService } from '@nestjs/jwt';
+import { ConfigService } from '@nestjs/config';
+import { StringValue } from 'ms';
+import crypto from 'crypto';
+import { CorePrismaService } from '../prisma/core-prisma.service';
+import {
+  AccountReactivationDto,
+  AuthResponse,
+  EmailVerificationDto,
+  ForgotPasswordDto,
+  GracePeriodResponse,
+  LoginDto,
+  RegisterDto,
+  ResetPasswordDto,
+  TokenResponse,
+} from './dto/auth.dto';
+import {
+  DEFAULT_LANGUAGE,
+  EmailAlreadyExistsException,
+  EmailService,
+  GRACE_PERIOD_DAYS,
+  InvalidCredentialsException,
+  InvalidRefreshTokenException,
+  JwtPayload,
+  LOCK_DURATION_MINUTES,
+  MAX_LOGIN_ATTEMPTS,
+  RoleCode,
+  VerificationTokenType,
+  comparePassword,
+  hashPassword,
+  issueVerificationToken,
+  maskEmail,
+} from '@kambriq/common';
+import { I18nService } from 'nestjs-i18n';
+
+@Injectable()
+export class AuthService {
+  private readonly logger = new Logger(AuthService.name);
+  private readonly frontendUrl: string;
+
+  constructor(
+    private readonly prisma: CorePrismaService,
+    private readonly jwtService: JwtService,
+    private readonly config: ConfigService,
+    private readonly emailService: EmailService,
+    private readonly i18n: I18nService,
+  ) {
+    this.frontendUrl = this.config.get<string>('FRONTEND_URL', 'http://localhost:3001');
+  }
+
+  // ----- Register ------------------------------------------
+  async register(dto: RegisterDto): Promise<AuthResponse> {
+    const lang = dto.language || 'fr';
+
+    const existing = await this.prisma.user.findUnique({
+      where: { email: dto.email.toLowerCase() },
+    });
+    if (existing) {
+      throw new EmailAlreadyExistsException(this.t('auth.emailExists', lang));
+    }
+
+    /**
+     * I19 - the role is looked up BEFORE anything is created, and its absence
+     * stops registration.
+     *
+     * This used to create the user first and skip the assignment when the row
+     * was missing: the account existed, the verification email went out, the
+     * token carried no role, and the log said "User registered". A missing
+     * CLIENT row is a broken database, not a user to create quietly.
+     */
+    const clientRole = await this.prisma.role.findUnique({
+      where: { code: RoleCode.CLIENT },
+    });
+    if (!clientRole) {
+      throw new Error(
+        `Cannot register a user: the ${RoleCode.CLIENT} role is missing from the database.`,
+      );
+    }
+
+    const passwordHash = await hashPassword(dto.password);
+
+    const user = await this.prisma.user.create({
+      data: {
+        email: dto.email.toLowerCase(),
+        passwordHash,
+        firstName: dto.firstName,
+        lastName: dto.lastName,
+        phone: dto.phone,
+        preferredLanguage: lang,
+      },
+    });
+
+    await this.prisma.userRole.create({
+      data: { userId: user.id, roleId: clientRole.id },
+    });
+
+    // Send verification email
+    const verificationToken = await this.createVerificationToken(
+      user.id,
+      VerificationTokenType.EMAIL_VERIFICATION,
+    );
+    const verificationUrl = `${this.frontendUrl}/verify-email?token=${verificationToken}`;
+    await this.emailService.send({
+      to: user.email,
+      template: 'verification',
+      lang,
+      args: {
+        firstName: user.firstName,
+        verificationUrl,
+      },
+    });
+
+    const roles = [RoleCode.CLIENT];
+    const tokens = await this.generateTokens(user.id, user.email, roles, lang);
+
+    this.logger.log('User registered %o', { userId: user.id, lang });
+
+    return {
+      user: {
+        id: user.id,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        roles,
+        language: lang,
+      },
+      tokens,
+    };
+  }
+
+  // ----- Login ------------------------------------------
+  async login(dto: LoginDto): Promise<AuthResponse | GracePeriodResponse> {
+    const user = await this.prisma.user.findUnique({
+      where: { email: dto.email.toLowerCase() },
+      include: { userRoles: { include: { role: true } } },
+    });
+
+    const lang = user?.preferredLanguage || 'fr';
+
+    if (!user) {
+      throw new InvalidCredentialsException(this.t('auth.login.invalidCredentials', lang));
+    }
+
+    if (!user.emailVerified) {
+      throw new UnauthorizedException(this.t('auth.login.emailNotVerified', lang));
+    }
+
+    if (!user.isActive) {
+      if (user.deletedAt && !user.deactivatedBy && this.isWithenGracePeriod(user.deletedAt)) {
+        const daysRemaining = Math.ceil(
+          (GRACE_PERIOD_DAYS * 86_400_000 - (Date.now() - user.deletedAt.getTime())) / 86_400_000,
+        );
+        this.logger.log('Inactive user within grace period attempted login %o', {
+          userId: user.id,
+          daysRemaining,
+        });
+
+        return {
+          requiresReactivation: true,
+          userId: user.id,
+          daysRemaining,
+          message: this.t('auth.login.gracePeriodDays', lang, {
+            days: daysRemaining,
+          }),
+        };
+      }
+
+      throw new InvalidCredentialsException(this.t('auth.login.inactiveAccount', lang));
+    }
+
+    if (user.lockedUntil && user.lockedUntil > new Date()) {
+      const minutesLeft = Math.ceil((user.lockedUntil.getTime() - Date.now()) / 60_000);
+      throw new UnauthorizedException(
+        this.t('auth.login.accountLocked', lang, { minutes: minutesLeft }),
+      );
+    }
+
+    /**
+     * A bootstrapped account exists before anybody has chosen a password.
+     *
+     * The message stays the generic one on purpose - "this account has no
+     * password" is an account-enumeration oracle, and the route is public. The
+     * log line is where the distinction lives, so the case is visible to us
+     * without being visible to a caller.
+     */
+    if (!user.passwordHash) {
+      this.logger.log('Login refused: no password has ever been set on this account %o', {
+        userId: user.id,
+        email: maskEmail(user.email),
+      });
+      throw new InvalidCredentialsException(this.t('auth.login.invalidCredentials', lang));
+    }
+
+    const isPasswordValid = await comparePassword(dto.password, user.passwordHash);
+    if (!isPasswordValid) {
+      const attempts = user.loginAttempts + 1;
+      await this.handleFailedLogin({
+        attempts,
+        userId: user.id,
+      });
+
+      const remaining = MAX_LOGIN_ATTEMPTS - attempts;
+
+      if (remaining > 0) {
+        throw new UnauthorizedException(
+          this.t('auth.login.attemptsRemaining', lang, { remaining }),
+        );
+      }
+
+      throw new UnauthorizedException(
+        this.t('auth.login.lockedAfterAttempts', lang, {
+          minutes: LOCK_DURATION_MINUTES,
+        }),
+      );
+    }
+
+    if (user.loginAttempts > 0 || user.lockedUntil) {
+      await this.prisma.user.update({
+        where: { id: user.id },
+        data: { loginAttempts: 0, lockedUntil: null },
+      });
+    }
+
+    const roles = user.userRoles.map((ur) => ur.role.code);
+    const tokens = await this.generateTokens(
+      user.id,
+      user.email,
+      roles,
+      lang,
+      dto.rememberMe ?? false,
+    );
+
+    this.logger.log('User logged in %o', { userId: user.id });
+
+    return {
+      tokens,
+      user: {
+        id: user.id,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        roles: roles,
+        language: lang,
+      },
+    };
+  }
+
+  // ----- Refresh Token ------------------------------------------
+  async refreshTokens(refreshToken: string): Promise<TokenResponse> {
+    try {
+      this.jwtService.verify(refreshToken);
+    } catch {
+      throw new InvalidRefreshTokenException(this.t('auth.token.invalidRefresh'));
+    }
+
+    const storedToken = await this.prisma.refreshToken.findFirst({
+      where: { token: this.hashToken(refreshToken) },
+      include: {
+        user: { include: { userRoles: { include: { role: true } } } },
+      },
+    });
+
+    if (!storedToken || storedToken.revokedAt || storedToken.expiresAt < new Date()) {
+      throw new InvalidRefreshTokenException(this.t('auth.token.invalidRefresh'));
+    }
+
+    await this.prisma.refreshToken.update({
+      where: { id: storedToken.id },
+      data: { revokedAt: new Date() },
+    });
+
+    if (!storedToken.user || !storedToken.user.isActive) {
+      throw new UnauthorizedException(
+        this.t(
+          'auth.token.accountInactive',
+          storedToken.user?.preferredLanguage || DEFAULT_LANGUAGE,
+        ),
+      );
+    }
+
+    const roles = storedToken.user.userRoles.map((ur) => ur.role.code);
+
+    // Infer "remember me" from the original token's duration.
+    // Short tokens (24h) were session-only; long tokens (30d) were remembered.
+    // 2 days is a safe threshold - well above 24h, well below 30d.
+    const durationMs = storedToken.expiresAt.getTime() - storedToken.createdAt.getTime();
+    const wasRemembered = durationMs > 2 * 86_400_000;
+
+    const tokens = await this.generateTokens(
+      storedToken.user.id,
+      storedToken.user.email,
+      roles,
+      storedToken.user.preferredLanguage || 'fr',
+      wasRemembered,
+    );
+
+    this.logger.log('Token refreshed %o', { userId: storedToken.user.id });
+
+    return { ...tokens, rememberMe: wasRemembered };
+  }
+
+  // ----- Logout ------------------------------------------
+  async logout(refreshToken: string): Promise<void> {
+    const tokenHash = this.hashToken(refreshToken);
+    await this.prisma.refreshToken.updateMany({
+      where: { token: tokenHash, revokedAt: null },
+      data: { revokedAt: new Date() },
+    });
+
+    // The refresh-token hash is an authentication artefact and is deliberately
+    // not logged; the userId is enough to trace a logout.
+    this.logger.log('User logged out');
+  }
+
+  // ----- Verify Email ------------------------------------------
+  async verifyEmail(dto: EmailVerificationDto): Promise<{ message: string }> {
+    const tokenRecord = await this.prisma.verificationToken.findUnique({
+      where: { token: dto.token },
+      include: { user: { select: { preferredLanguage: true } } },
+    });
+
+    const lang = tokenRecord?.user?.preferredLanguage || 'fr';
+
+    if (!tokenRecord || tokenRecord.type !== VerificationTokenType.EMAIL_VERIFICATION) {
+      throw new BadRequestException(this.t('auth.email.invalidToken', lang));
+    }
+    if (tokenRecord.usedAt) {
+      throw new BadRequestException(this.t('auth.email.tokenUsed', lang));
+    }
+    if (tokenRecord.expiresAt < new Date()) {
+      throw new BadRequestException(this.t('auth.email.tokenExpired', lang));
+    }
+
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: tokenRecord.userId },
+        data: { emailVerified: true },
+      }),
+      this.prisma.verificationToken.update({
+        where: { id: tokenRecord.id },
+        data: { usedAt: new Date() },
+      }),
+    ]);
+
+    this.logger.log('Email verified %o', { userId: tokenRecord.userId });
+    return { message: this.t('auth.email.verified', lang) };
+  }
+
+  async resendVerificationEmail(email: string): Promise<{ message: string }> {
+    const user = await this.prisma.user.findUnique({ where: { email } });
+    const lang = user?.preferredLanguage || 'fr';
+
+    if (!user) {
+      return { message: this.t('auth.email.verificationSent', lang) };
+    }
+    if (user.emailVerified) {
+      return { message: this.t('auth.email.alreadyVerified', lang) };
+    }
+
+    const token = await this.createVerificationToken(
+      user.id,
+      VerificationTokenType.EMAIL_VERIFICATION,
+    );
+    const verificationUrl = `${this.frontendUrl}/verify-email?token=${token}`;
+
+    await this.emailService.send({
+      to: user.email,
+      template: 'verification',
+      lang,
+      args: {
+        firstName: user.firstName,
+        verificationUrl,
+      },
+    });
+
+    this.logger.log('Verification email resent %o', {
+      userId: user.id,
+      email: maskEmail(user.email),
+    });
+    return { message: this.t('auth.email.verificationSent', lang) };
+  }
+
+  // ----- Forgot / Reset Password ------------------------------------------
+  async forgotPassword(dto: ForgotPasswordDto): Promise<{ message: string }> {
+    const user = await this.prisma.user.findUnique({
+      where: { email: dto.email },
+    });
+    const lang = user?.preferredLanguage || 'fr';
+
+    if (user && user.isActive) {
+      const token = await this.createVerificationToken(
+        user.id,
+        VerificationTokenType.PASSWORD_RESET,
+      );
+      const resetUrl = `${this.frontendUrl}/reset-password?token=${token}`;
+
+      await this.emailService.send({
+        to: user.email,
+        template: 'passwordReset',
+        lang,
+        args: {
+          firstName: user.firstName,
+          resetUrl,
+        },
+      });
+
+      this.logger.log('Password reset email sent %o', {
+        userId: user.id,
+        email: maskEmail(user.email),
+      });
+      return { message: this.t('auth.password.resetSent', lang) };
+    }
+    return { message: this.t('auth.password.resetSent', lang) };
+  }
+  async resetPassword(dto: ResetPasswordDto): Promise<{ message: string }> {
+    const { token, newPassword } = dto;
+    const tokenRecord = await this.prisma.verificationToken.findUnique({
+      where: { token },
+      include: {
+        user: {
+          select: {
+            id: true,
+            email: true,
+            firstName: true,
+            preferredLanguage: true,
+          },
+        },
+      },
+    });
+
+    const lang = tokenRecord?.user?.preferredLanguage || 'fr';
+
+    if (!tokenRecord || tokenRecord.type !== VerificationTokenType.PASSWORD_RESET) {
+      throw new BadRequestException(this.t('auth.password.invalidResetToken', lang));
+    }
+    if (tokenRecord.usedAt) {
+      throw new BadRequestException(this.t('auth.email.tokenUsed', lang));
+    }
+    if (tokenRecord.expiresAt < new Date()) {
+      throw new BadRequestException(this.t('auth.email.tokenExpired', lang));
+    }
+
+    const passwordHash = await hashPassword(newPassword);
+
+    /**
+     * Consuming this token proves control of the mailbox, so the address is
+     * verified.
+     *
+     * A client invited by a land reservation received a set-password link,
+     * used it, got a 204 — and could not log in, because `emailVerified` was
+     * still false and login refuses an unverified address. They had proved
+     * ownership of that mailbox by the only means the system has, and were told
+     * to go and prove it again with a link they were never sent.
+     *
+     * It is the same evidence `verify-email` accepts: a secret delivered to that
+     * address and returned. Requiring it twice is not extra safety, it is a dead
+     * end — and the dead end was silent, because every step before it succeeded.
+     */
+    await this.prisma.$transaction([
+      this.prisma.user.update({
+        where: { id: tokenRecord.userId },
+        data: { passwordHash, loginAttempts: 0, lockedUntil: null, emailVerified: true },
+      }),
+      this.prisma.verificationToken.update({
+        where: { id: tokenRecord.id },
+        data: { usedAt: new Date() },
+      }),
+      this.prisma.refreshToken.updateMany({
+        where: { userId: tokenRecord.userId, revokedAt: null },
+        data: { revokedAt: new Date() },
+      }),
+    ]);
+
+    if (tokenRecord.user) {
+      await this.emailService.send({
+        to: tokenRecord.user.email,
+        template: 'passwordResetConfirmation',
+        lang,
+        args: {
+          firstName: tokenRecord.user.firstName,
+        },
+      });
+    }
+
+    this.logger.log('Password reset successful %o', {
+      userId: tokenRecord.userId,
+    });
+    return { message: this.t('auth.password.resetSuccess', lang) };
+  }
+
+  // ----- Account Reactivation ------------------------------------------
+  async reactivateAccount(dto: AccountReactivationDto): Promise<AuthResponse> {
+    const user = await this.prisma.user.findUnique({
+      where: { email: dto.email.toLowerCase() },
+      include: { userRoles: { include: { role: true } } },
+    });
+
+    const lang = user?.preferredLanguage || 'fr';
+
+    if (!user) {
+      throw new NotFoundException(this.t('auth.login.invalidCredentials', lang));
+    }
+    if (!user.deletedAt || user.deactivatedBy) {
+      throw new BadRequestException(this.t('auth.reactivation.notEligible', lang));
+    }
+    if (!this.isWithenGracePeriod(user.deletedAt)) {
+      throw new BadRequestException(this.t('auth.reactivation.gracePeriodExpired', lang));
+    }
+
+    const isPasswordValid = await comparePassword(dto.password, user.passwordHash);
+    if (!isPasswordValid) {
+      throw new BadRequestException(this.t('auth.login.invalidCredentials', lang));
+    }
+
+    await this.prisma.user.update({
+      where: { id: user.id },
+      data: {
+        isActive: true,
+        deletedAt: null,
+        deactivatedBy: null,
+        loginAttempts: 0,
+        lockedUntil: null,
+      },
+    });
+
+    const roles = user.userRoles.map((ur) => ur.role.code);
+    const tokens = await this.generateTokens(user.id, user.email, roles, lang);
+
+    await this.emailService.send({
+      to: user.email,
+      template: 'accountReactivated',
+      lang,
+      args: {
+        firstName: user.firstName,
+      },
+    });
+
+    this.logger.log('Account reactivated %o', { userId: user.id });
+
+    return {
+      user: {
+        id: user.id,
+        email: user.email,
+        firstName: user.firstName,
+        lastName: user.lastName,
+        roles,
+        language: lang,
+      },
+      tokens,
+    };
+  }
+
+  // ----- Private Helpers ------------------------------------------
+  private async generateTokens(
+    userId: string,
+    email: string,
+    roles: string[],
+    lang: string,
+    rememberMe = false,
+  ): Promise<TokenResponse> {
+    const payload: JwtPayload = {
+      sub: userId,
+      email,
+      roles,
+      lang,
+    };
+
+    const accessExpiration = this.config.get<StringValue>('JWT_ACCESS_EXPIRATION', '15m');
+
+    // rememberMe: true  → long-lived token from config (e.g. 30d), persistent cookie
+    // rememberMe: false → short-lived (24h), session cookie deleted when browser closes
+    const refreshExpiration: StringValue = rememberMe
+      ? this.config.get<StringValue>('JWT_REFRESH_EXPIRATION', '30d')
+      : '24h';
+
+    const accessToken = this.jwtService.sign(payload, {
+      expiresIn: accessExpiration,
+    });
+    const refreshToken = this.jwtService.sign(payload, {
+      expiresIn: refreshExpiration,
+    });
+
+    const accessExpiresAt = new Date(Date.now() + this.parseExpiry(accessExpiration));
+    const expiresAt = new Date(Date.now() + this.parseExpiry(refreshExpiration));
+
+    await this.prisma.refreshToken.create({
+      data: {
+        userId,
+        token: this.hashToken(refreshToken),
+        expiresAt,
+      },
+    });
+
+    return {
+      accessToken,
+      refreshToken,
+      expiresAt,
+      accessExpiresAt,
+      rememberMe,
+    };
+  }
+
+  private async handleFailedLogin(data: { attempts: number; userId: string }) {
+    await this.prisma.user.update({
+      where: { id: data.userId },
+      data: {
+        loginAttempts: { increment: 1 },
+      },
+    });
+
+    if (data.attempts >= MAX_LOGIN_ATTEMPTS) {
+      const lockUntil = new Date(Date.now() + LOCK_DURATION_MINUTES * 60_000);
+      await this.prisma.user.update({
+        where: { id: data.userId },
+        data: {
+          lockedUntil: lockUntil,
+        },
+      });
+      this.logger.warn(`Account locked due to too many failed attempts %o`, {
+        userId: data.userId,
+        lockUntil: LOCK_DURATION_MINUTES,
+      });
+    }
+  }
+
+  /**
+   * Delegates to `issueVerificationToken` in `libs/common`.
+   *
+   * The body used to live here. `prisma/bootstrap-admins.ts` needs to issue the
+   * same token and cannot import anything under `apps/api/src` - the production
+   * image carries `dist/apps/api` bundled, not this tree as source. Rather than
+   * a second implementation in the script, there is one implementation and two
+   * callers. **Two ways of minting one token is how the two drift**, and the
+   * drift would be invisible until a link stopped working.
+   */
+  private async createVerificationToken(
+    userId: string,
+    type: VerificationTokenType,
+  ): Promise<string> {
+    return issueVerificationToken(this.prisma, userId, type);
+  }
+
+  private hashToken(token: string): string {
+    return crypto.createHash('sha256').update(token).digest('hex');
+  }
+
+  private parseExpiry(expiry: StringValue): number {
+    const units: Record<string, number> = {
+      s: 1_000,
+      m: 60_000,
+      h: 3_600_000,
+      d: 86_400_000,
+    };
+
+    const match = expiry.match(/^(\d+)([smhd])$/);
+
+    if (!match) return 15 * 864_000_000;
+
+    return parseInt(match[1], 10) * (units[match[2]] || 86_400_000);
+  }
+
+  private isWithenGracePeriod(deletedAt: Date | null): boolean {
+    if (!deletedAt) return false;
+    const daysSinceDeletion = (Date.now() - deletedAt.getTime()) / (1_000 * 60 * 60 * 24);
+    return daysSinceDeletion <= GRACE_PERIOD_DAYS;
+  }
+
+  private t(key: string, lang = 'fr', args?: Record<string, unknown>): string {
+    return this.i18n.translate(key, { lang, args });
+  }
+}

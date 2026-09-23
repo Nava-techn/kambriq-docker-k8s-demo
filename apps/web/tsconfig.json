@@ -1,0 +1,60 @@
+{
+  "extends": "../../tsconfig.base.json",
+  "compilerOptions": {
+    // G4: es2015 (the base) predates BigInt literals, and money in this codebase
+    // is BigInt - `sumReceipts` in the shared state machine is written `0n`.
+    // Without this the web build fails with TS2737 the moment it imports the
+    // transition table, and the workaround would be `BigInt(0)` in shared code
+    // to satisfy a browser target the API does not have: a defect written into
+    // the money path to please a config.
+    "target": "es2020",
+    "jsx": "preserve",
+    "strict": true,
+    "noEmit": true,
+    "emitDeclarationOnly": false,
+    "esModuleInterop": true,
+    "module": "esnext",
+    "moduleResolution": "bundler",
+    "resolveJsonModule": true,
+    "isolatedModules": true,
+    "lib": ["dom", "dom.iterable", "esnext"],
+    "allowJs": true,
+    "allowSyntheticDefaultImports": true,
+    "forceConsistentCasingInFileNames": true,
+    "incremental": true,
+    "plugins": [
+      {
+        "name": "next"
+      }
+    ],
+    "types": ["jest", "node"],
+    "baseUrl": ".",
+    // G4: this file overrides `paths` wholesale, so the base alias for
+    // @kambriq/common is lost here and has to be restated. Only the deep form
+    // is mapped, never the barrel - importing the index would pull the Nest
+    // runtime into the browser bundle. Pure helpers only.
+    "paths": {
+      "@/*": ["./src/*"],
+      "@kambriq/common/*": ["../../libs/common/src/*"]
+    }
+  },
+  "include": [
+    "**/*.ts",
+    "**/*.tsx",
+    "**/*.js",
+    "**/*.jsx",
+    "**/*.mdx",
+    "../../apps/web/.next/types/**/*.ts",
+    "../../dist/apps/web/.next/types/**/*.ts",
+    "next-env.d.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "jest.config.ts",
+    "jest.config.cts",
+    "**/*.spec.ts",
+    "**/*.test.ts",
+    "src/**/*.spec.ts",
+    "src/**/*.test.ts"
+  ]
+}

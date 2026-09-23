@@ -1,0 +1,229 @@
+generator client {
+  provider = "prisma-client"
+  output   = "../../libs/common/src/prisma/core-client"
+}
+
+datasource db {
+  provider = "postgresql"
+}
+
+// ----- CORE Module ----- //
+// Users, Roles, Permissions, Auth //
+
+model User {
+  id                String   @id @default(uuid())
+  email             String   @unique
+  /// Nullable: a bootstrapped account exists before anybody has chosen a
+  /// password. It is set by the ordinary reset flow, which is also what marks
+  /// the address verified. A null here means "no password has ever been set",
+  /// and login refuses it - see auth.service.ts.
+  passwordHash      String?
+  firstName         String
+  lastName          String
+  phone             String?
+  isActive          Boolean  @default(true)
+  emailVerified     Boolean  @default(false)
+  preferredLanguage String   @default("fr")
+
+  createdAt   DateTime  @default(now())
+  updatedAt   DateTime  @updatedAt
+  deletedAt   DateTime?
+  deactivatedBy String?
+
+  pendingEmail  String?
+
+  lastLoginAt   DateTime?
+  loginAttempts Int       @default(0)
+  lockedUntil   DateTime?
+
+  userRoles          UserRole[]
+  refreshTokens      RefreshToken[]
+  profile            UserProfile?
+  verificationTokens VerificationToken[]
+}
+
+model Role {
+  id          String   @id @default(uuid())
+  code        String   @unique
+  name        String
+  description String?
+  createdAt   DateTime @default(now())
+
+  userRoles UserRole[]
+}
+
+model UserRole {
+  id        String   @id @default(uuid())
+  userId    String
+  roleId    String
+  grantedAt DateTime @default(now())
+  grantedBy String?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+  role Role @relation(fields: [roleId], references: [id], onDelete: Cascade)
+
+  @@unique([userId, roleId])
+}
+
+model UserProfile {
+  id        String   @id @default(uuid())
+  userId    String   @unique
+  avatarUrl String?  // S3 key
+  address   String?
+  city      String?
+  country   String?
+
+// Notification preferences
+  emailNotifications  Boolean @default(false)
+  /// DEPRECATED by A12, and kept so no stored value is lost.
+  ///
+  /// There is no WhatsApp sender in the API - not a disabled one, none at all -
+  /// so the preference was stored, echoed back, and read by nothing. Every
+  /// statement the API made about it was true and the exchange was false,
+  /// because offering a preference implies the capability behind it.
+  ///
+  /// Removed from the API surface and from the web rather than labelled "not yet
+  /// available": a disabled control still asks a person to form an intention the
+  /// system cannot honour, and stores it. When a sender exists, the preference
+  /// comes back and asks again, fresh.
+  whatsappNotifications  Boolean @default(false)
+
+  /// The payment channel this client last said suited them.
+  ///
+  /// v03 section 4c: "un client qui a paye en OMO une fois le proposera par
+  /// defaut la fois suivante". A default for the next request, nothing more -
+  /// it binds no payment and the back office is never bound by it either.
+  ///
+  /// Stored as the channel **code** (`VIR`, `DEPO`, `OMO`, `MOMO`, `ESP`,
+  /// `NOTA`), a plain string because the enum lives in the lands database and
+  /// there are no cross-database types. `payment-channels.ts` is the authority;
+  /// `channel-code-consistency.spec.ts` fails if the two drift apart.
+  preferredPaymentChannel String?
+
+  // Identity verification
+  idDocumentUrls       String[]  @default([])
+  idVerificationStatus String    @default("none") // none | pending | verified | rejected
+  /// When the holder submitted, which is not when the row was last touched.
+  ///
+  /// Added by A10. Without it "how long has this been waiting" was
+  /// unanswerable: 59 documents sat at `pending` and nothing in the data said
+  /// for how long. A queue you cannot age is a queue nobody can be accountable
+  /// for.
+  idSubmittedAt        DateTime?
+  idVerifiedAt         DateTime?
+  idVerifiedBy         String?
+  idRejectionReason    String?
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+}
+
+model RefreshToken {
+  id        String    @id @default(uuid())
+  userId    String
+  token     String    @unique
+  expiresAt DateTime
+  createdAt DateTime  @default(now())
+  revokedAt DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId])
+  @@index([token])
+}
+
+model VerificationToken {
+  id        String    @id @default(uuid())
+  userId    String
+  token     String    @unique
+  type      String    // email_verification | password_reset | email_change
+  expiresAt DateTime
+  createdAt DateTime  @default(now())
+  usedAt    DateTime?
+
+  user User @relation(fields: [userId], references: [id], onDelete: Cascade)
+
+  @@index([userId, type])
+  @@index([token])
+}
+
+// ---------------------------------------------------------------------------
+// L1 - the inbound contact request
+//
+// Every commercial CTA on the public site leads to /contact, so this table is
+// the first thing a prospect ever leaves behind. It lives in `core` rather than
+// in a domain schema because the request is module-agnostic: its subject can be
+// lands, VERIFY, KAMNET, KBS or a partnership, and it arrives from somebody who
+// has no account and belongs to no module yet.
+//
+// **Not `KamnetLead`.** That model is an agent's own prospect: `agentId` is
+// required and foreign-keyed to `KamnetAgent`. A public request has no agent,
+// and giving it a fabricated one to reuse the table would put a lead in an
+// agent's pipeline that the agent never spoke to.
+// ---------------------------------------------------------------------------
+
+/// What the prospect said their request is about. Mirrors the six options the
+/// contact form offers; the labels live in the web i18n catalogues.
+enum ContactSubject {
+  LANDS
+  VERIFY
+  KAMNET
+  KBS
+  PARTNERSHIP
+  OTHER
+}
+
+/// Where the request has got to in the back office.
+enum ContactRequestStatus {
+  NEW
+  IN_PROGRESS
+  CLOSED
+}
+
+model ContactRequest {
+  id String @id @default(uuid())
+
+  name  String
+  email String
+  /// Optional: the form asks for it and does not require it.
+  phone String?
+
+  subject ContactSubject
+  message String
+
+  /// The language the page was in when the request was made.
+  ///
+  /// Stored rather than derived from the address or the browser: the
+  /// acknowledgement goes out in it, and so does any human reply. A prospect
+  /// who wrote to us in French is answered in French, months later, without
+  /// anybody having to guess.
+  locale String @default("fr")
+
+  /// **When consent was given, which is the record that it was.**
+  ///
+  /// Non-nullable on purpose: a row cannot exist without it. The checkbox, the
+  /// DTO and the service each refuse a request without consent, and this column
+  /// is the one that cannot be talked round - a script or a console writing
+  /// straight to the table still has to supply a timestamp.
+  ///
+  /// The timestamp is the server's, not the browser's: a client-supplied
+  /// consent time is a claim, not a record.
+  consentGivenAt DateTime
+
+  /// The privacy policy path the consent text pointed at when it was ticked.
+  ///
+  /// Consent is to a document, and that document changes. Without this the row
+  /// says somebody agreed to something and cannot say to what.
+  consentPolicyPath String
+
+  status ContactRequestStatus @default(NEW)
+
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  /// Read by the daily digest, which counts a 48-hour window.
+  @@index([createdAt])
+  @@index([status])
+}
