@@ -1,14 +1,15 @@
-FROM node:26-alpine-3.23
+FROM node:26-bookworm-slim
+
+RUN npm install -g pnpm
 
 WORKDIR /usr/src/app
 
 COPY package.json pnpm-lock.yaml pnpm-workspace.yaml ./
+COPY prisma ./prisma
 
 RUN pnpm install
 
 COPY . .
-
-RUN pnpm prisma generate
 
 RUN pnpm build
 
