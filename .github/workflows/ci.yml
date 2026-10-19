@@ -1,0 +1,20 @@
+name: CI
+
+on:
+  push:
+    branches: [master]
+  workflow_dispatch:
+
+jobs:
+  hello:
+    runs-on: ubuntu-latest
+    steps:
+      - name: say hello
+        run: echo"hello from Github Actions"
+
+      - name: look at the runner
+        run: |
+          whoami
+          pwd
+          ls -la
+          
