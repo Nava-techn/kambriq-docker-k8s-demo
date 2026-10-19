@@ -9,12 +9,11 @@ jobs:
   hello:
     runs-on: ubuntu-latest
     steps:
-      - name: say hello
-        run: echo"hello from Github Actions"
+      - name: Say hello
+        run: echo "hello from Github Actions"
 
-      - name: look at the runner
+      - name: Look at the runner
         run: |
           whoami
           pwd
           ls -la
-          
