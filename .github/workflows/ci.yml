@@ -35,3 +35,18 @@ jobs:
         run: |
           pnpm test:common
           pnpm test:api
+  docker:
+    runs-on: ubuntu-latest
+    needs: build
+    steps:
+      - name: Get code
+        uses: actions/checkout@v7
+
+      - name: Build the API image
+        run: docker build -f docker/Dockerfile -t kambriq-api:${{ github.sha }} .
+
+      - name: Check the image contains the app
+        run: |
+          docker image ls kambriq-api
+          docker run --rm --entrypoint node kambriq-api:${{ github.sha }} \
+            -e "require('fs').accessSync('dist/apps/api/main.js'); console.log('main.js is in the image')"
