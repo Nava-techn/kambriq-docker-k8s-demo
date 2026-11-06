@@ -5,6 +5,11 @@ services:
       context: .
       dockerfile: docker/Dockerfile
     container_name: kambriq_apik
+    depends_on:
+      db:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
     ports:
       - "3000:3000"
     environment:
@@ -29,8 +34,18 @@ services:
       - "5432:5432"
     volumes:
       - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres -h 127.0.0.1"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
   redis:
     image: redis:7.2.0
     container_name: kambriq_redisk
     ports:
       - "6379:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 2s
+      timeout: 5s
+      retries: 30
