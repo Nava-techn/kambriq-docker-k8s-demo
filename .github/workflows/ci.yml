@@ -1,90 +1,135 @@
+# =============================================================================
+# Kambriq CI/CD pipeline (GitHub Actions)
+#
+# WHAT: on every push to master and every pull request, check the code, build
+#       and test the Docker image, run the database tests, and (on master only)
+#       publish the tested image to GitHub Container Registry (GHCR).
+# WHY:  nothing is merged or delivered without passing the same checks, on a
+#       clean machine, every time. CI = continuous integration;
+#       publishing the image = continuous delivery.
+# HOW:  GitHub reads this file and starts a fresh Ubuntu machine (a "runner")
+#       for each job. The graph is:
+#
+#         checks (4 jobs in parallel) ──┬──> docker   (build, test, publish)
+#                                       └──> db-tests (PostgreSQL + Redis)
+# =============================================================================
+
 name: CI
 
+# WHEN the pipeline runs.
 on:
   push:
-    branches: [master]
-  pull_request:
-  workflow_dispatch:
+    branches: [master] # every push to master
+  pull_request: # every pull request, whatever its target branch
+  workflow_dispatch: # a "Run workflow" button in the Actions tab
+
+# WHY: on a pull request, a new push makes the running check out of date, so it
+# is cancelled. On master, every commit keeps its own run (and its result).
+concurrency:
+  group: ci-${{ github.ref }} # one group per branch / pull request
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+
+# WHY: least privilege. The automatic GITHUB_TOKEN of every job can only READ
+# the repository. A job that needs more asks for it (see the docker job).
+permissions:
+  contents: read
 
 jobs:
-  build:
+  # ---------------------------------------------------------------------------
+  # Quality checks. A MATRIX creates one job per value of "check", and the 4
+  # jobs run at the same time on 4 machines.
+  # ---------------------------------------------------------------------------
+  checks:
+    name: ${{ matrix.check }} # each job shows its own name in the UI
     runs-on: ubuntu-latest
+    timeout-minutes: 15 # stop a stuck job (the default limit is 6 hours)
+    strategy:
+      fail-fast: false # one failure does not cancel the others: full report
+      matrix:
+        check: [lint, typecheck, test:common, test:api] # scripts of package.json
     steps:
-      - name: Get code
+      - name: Get code # the runner starts empty: copy the commit being tested
         uses: actions/checkout@v7
 
-      - name: Install pnpm
+      - name: Install pnpm # the version comes from "packageManager" in package.json
         uses: pnpm/action-setup@v6
 
-      - name: Install Node.js
+      - name: Install Node.js # same major version as the Dockerfile (26)
         uses: actions/setup-node@v7
         with:
           node-version: 26
-          cache: pnpm
+          cache: pnpm # reuse downloaded packages while pnpm-lock.yaml is unchanged
 
-      - name: Install dependencies
+      - name: Install dependencies # --frozen-lockfile: fail if the lockfile is out of date
         run: pnpm install --frozen-lockfile
 
-      - name: Lint
-        run: pnpm lint
+      - name: Run ${{ matrix.check }} # pnpm lint / typecheck / test:common / test:api
+        run: pnpm ${{ matrix.check }}
 
-      - name: Typecheck
-        run: pnpm typecheck
-
-      - name: Unit tests
-        run: |
-          pnpm test:common
-          pnpm test:api
+  # ---------------------------------------------------------------------------
+  # Build the API image, prove it contains the app, and publish it from master.
+  # ---------------------------------------------------------------------------
   docker:
+    name: Docker image
     runs-on: ubuntu-latest
-    needs: build
+    timeout-minutes: 20
+    needs: checks # start only if ALL the matrix jobs passed
     permissions:
       contents: read
-      packages: write
+      packages: write # needed to push to GHCR, and only in this job
     env:
-      IMAGE: ghcr.io/nava-techn/kambriq-api
+      IMAGE: ghcr.io/nava-techn/kambriq-api # registry/owner/name, lowercase
     steps:
       - name: Get code
         uses: actions/checkout@v7
 
-      - name: Set up Docker Buildx
+      - name: Set up Docker Buildx # modern builder, needed for the layer cache
         uses: docker/setup-buildx-action@v4
 
       - name: Build the API image
         uses: docker/build-push-action@v7
         with:
-          context: .
+          context: . # folder sent to Docker (filtered by .dockerignore)
           file: docker/Dockerfile
-          load: true
-          tags: ${{ env.IMAGE }}:${{ github.sha }}
+          load: true # keep the image in the runner's Docker, to test it below
+          tags: ${{ env.IMAGE }}:${{ github.sha }} # unique tag: the commit ID
+          # Links the package to this repository on GitHub.
           labels: org.opencontainers.image.source=https://github.com/Nava-techn/kambriq-docker-k8s-demo
+          # Reuse unchanged layers from earlier runs (GitHub Actions cache).
           cache-from: type=gha
           cache-to: type=gha,mode=max
 
-      - name: Check the image contains the app
+      - name: Check the image contains the app # smoke test: no database needed
         run: |
           docker image ls ${{ env.IMAGE }}
           docker run --rm --entrypoint node ${{ env.IMAGE }}:${{ github.sha }} \
             -e "require('fs').accessSync('dist/apps/api/main.js'); console.log('main.js is in the image')"
 
+      # Publishing: ONLY on a push to master, never from a pull request.
       - name: Log in to GitHub Container Registry
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         uses: docker/login-action@v4
         with:
           registry: ghcr.io
           username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+          password: ${{ secrets.GITHUB_TOKEN }} # temporary secret, created for this run
 
-      - name: Push the tested image
+      - name: Push the tested image # the exact image tested above, never a rebuild
         if: github.event_name == 'push' && github.ref == 'refs/heads/master'
         run: |
           docker tag ${{ env.IMAGE }}:${{ github.sha }} ${{ env.IMAGE }}:latest
           docker push ${{ env.IMAGE }}:${{ github.sha }}
           docker push ${{ env.IMAGE }}:latest
 
+  # ---------------------------------------------------------------------------
+  # Database tests: the *.dbspec.ts suites against a real PostgreSQL, started
+  # with the same docker-compose.yml as on a developer's laptop.
+  # ---------------------------------------------------------------------------
   db-tests:
+    name: Database tests
     runs-on: ubuntu-latest
-    needs: build
+    timeout-minutes: 20
+    needs: checks
     steps:
       - name: Get code
         uses: actions/checkout@v7
@@ -101,18 +146,18 @@ jobs:
       - name: Install dependencies
         run: pnpm install --frozen-lockfile
 
-      - name: Start PostgreSQL and Redis
+      - name: Start PostgreSQL and Redis # --wait: return only when both are healthy
         run: |
           docker compose up -d --wait db redis
           docker compose ps
 
-      - name: Database tests
+      - name: Database tests # creates *_test databases, runs the real migrations, then the tests
         run: pnpm test:db
 
-      - name: Show the database logs if something failed
+      - name: Show the database logs if something failed # runs only after a failure
         if: failure()
         run: docker compose logs db
 
-      - name: Stop and remove the containers
+      - name: Stop and remove the containers # runs even after a failure
         if: always()
         run: docker compose down -v

@@ -1,7 +1,6 @@
 # Kambriq
 
-[![CI](https://github.com/kloudnat-digital/kambriq-api/actions/workflows/ci.yml/badge.svg)](https://github.com/kloudnat-digital/kambriq-api/actions/workflows/ci.yml)
-[![codecov](https://codecov.io/gh/kloudnat-digital/kambriq-api/branch/main/graph/badge.svg)](https://codecov.io/gh/kloudnat-digital/kambriq-api)
+[![CI](https://github.com/Nava-techn/kambriq-docker-k8s-demo/actions/workflows/ci.yml/badge.svg?branch=master)](https://github.com/Nava-techn/kambriq-docker-k8s-demo/actions/workflows/ci.yml)
 
 Full-stack Nx monorepo containing the NestJS API and Next.js web application. The API exposes a single unified gateway routing requests across domain-specific modules, each backed by its own isolated PostgreSQL database. The web app is a Next.js 16 client consuming the API.
 

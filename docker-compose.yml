@@ -1,49 +1,90 @@
+# =============================================================================
+# Kambriq local stack: API + PostgreSQL + Redis
+#
+# WHAT: describes 3 containers that work together, on one private network.
+# WHY:  one command starts the whole stack the same way on every machine,
+#       and CI reuses this file to start the database for the database tests.
+# HOW:  docker compose up -d --build      start everything (build the API image)
+#       docker compose up -d --wait db redis   only the database and Redis (CI)
+#       docker compose ps / logs <service>    see the state / the logs
+#       docker compose down -v                stop and delete containers + volumes
+#
+# Compose creates a network "kambriq_default": containers reach each other by
+# SERVICE NAME (the API connects to "db" and "redis", not to an IP address).
+# =============================================================================
+
+# Project name: prefix of the containers, network and volumes.
 name: kambriq
+
 services:
+  # ---------------------------------------------------------------------------
+  # The NestJS API, built from our own Dockerfile.
+  # ---------------------------------------------------------------------------
   api:
     build:
-      context: .
-      dockerfile: docker/Dockerfile
+      context: . # folder sent to Docker: the repo root
+      dockerfile: docker/Dockerfile # our Dockerfile is not at the root
     container_name: kambriq_apik
+    # Start the API only once the database and Redis are really ready
+    # (their healthchecks below say "healthy"), not just "started".
     depends_on:
       db:
         condition: service_healthy
       redis:
         condition: service_healthy
     ports:
-      - "3000:3000"
+      - "3000:3000" # host port : container port -> http://localhost:3000
+    # Configuration read by the API at startup.
+    # DEV VALUES ONLY: in production, secrets come from a secret manager,
+    # never from a file in Git.
     environment:
       - NODE_ENV=development
+      # One database per domain; "db" is the service name below.
       -  DATABASE_URL_CORE=postgresql://postgres:password@db:5432/kambriq_core
       -  DATABASE_URL_KBS=postgresql://postgres:password@db:5432/kambriq_kbs
       -  DATABASE_URL_KAMNET=postgresql://postgres:password@db:5432/kambriq_kamnet
       -  DATABASE_URL_LANDS=postgresql://postgres:password@db:5432/kambriq_lands
       -  JWT_SECRET=dev-secret-minimum-32-characters-long-change-in-prod!!
-      -  STORAGE_TRANSPORT=disabled
-      -  REDIS_HOST=redis
+      -  STORAGE_TRANSPORT=disabled # no real file storage in local dev
+      -  REDIS_HOST=redis # "redis" is the service name below
       -  REDIS_PORT=6379
-      -  PAYMENT_CHANNELS_TRANSPORT=disabled
+      -  PAYMENT_CHANNELS_TRANSPORT=disabled # no real payment provider in local dev
+
+  # ---------------------------------------------------------------------------
+  # PostgreSQL: a ready-made image, downloaded from Docker Hub.
+  # ---------------------------------------------------------------------------
   db:
-    image: postgres:15.3
+    image: postgres:15.3 # pinned version: the same database everywhere
     container_name: kambriq_dbk
     environment:
       POSTGRES_USER: postgres
-      POSTGRES_PASSWORD: password
-      POSTGRES_DB: kambriq_db
+      POSTGRES_PASSWORD: password # dev only
+      POSTGRES_DB: kambriq_db # database created at the first start
     ports:
-      - "5432:5432"
+      - "5432:5432" # lets tools on the host (and the DB tests) connect to localhost:5432
     volumes:
+      # Scripts in this folder run ONCE, at the first start (empty data folder):
+      # init.sql creates the other databases.
       - ./docker/init.sql:/docker-entrypoint-initdb.d/init.sql
+    # WHY: "running" does not mean "ready". Docker runs this check every 2 s;
+    # the container becomes "healthy" when PostgreSQL accepts connections.
+    # "-h 127.0.0.1" checks the network port, so the temporary server used
+    # during init.sql is not mistaken for the real one.
     healthcheck:
       test: ["CMD-SHELL", "pg_isready -U postgres -h 127.0.0.1"]
       interval: 2s
       timeout: 5s
       retries: 30
+
+  # ---------------------------------------------------------------------------
+  # Redis: in-memory store used by the API for its job queues.
+  # ---------------------------------------------------------------------------
   redis:
     image: redis:7.2.0
     container_name: kambriq_redisk
     ports:
       - "6379:6379"
+    # Healthy when Redis answers PONG to a PING.
     healthcheck:
       test: ["CMD", "redis-cli", "ping"]
       interval: 2s
